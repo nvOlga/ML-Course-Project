@@ -1,0 +1,205 @@
+---
+title: "Machine Learning Course Project"
+author: "Olga Nevinchana"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Introduction
+
+## Background
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+## Project goal
+
+To predict the manner in which research participants did the exercise.
+
+Loading data and libraries
+
+```{r, include=FALSE}
+training = read.csv("~/Desktop/pml-training.csv")
+testing = read.csv("~/Desktop/pml-testing.csv")
+library(caret)
+library(glmnet)
+```
+
+# Data Cleaning
+
+Comparing two datasets and checking for any unique variables
+
+```{r}
+setdiff(names(training), names(testing))
+setdiff(names(testing), names(training))
+```
+
+Checking for NA
+
+```{r}
+any(is.na(training))
+any(is.na(testing))
+```
+
+There are variables with NAs in both datasets.
+
+Identifying NA variable in both training and testing datasets
+
+```{r}
+na_train <- names(which(colSums(is.na(training)) > 0))
+na_test <- names(which(colSums(is.na(testing)) > 0))
+```
+
+Removing variables that contain non-meaningful predictors: IDs, problem IDs, “timestamp” in both training and testing datasets
+
+```{r}
+training_subset <- training[, !(names(training) %in% c("X", "user_name", "new_window", "num_window") | grepl("timestamp", names(training)))]
+testing_subset <- testing[, !(names(testing) %in% c("X", "problem_id", "user_name", "new_window", "num_window") | grepl("timestamp", names(testing)))]
+```
+
+Checking the number of NA cases to decide if they can be imputed or must be excluded from the analysis
+
+```{r}
+summary(training_subset[na_train])
+summary(testing_subset[na_test])
+```
+
+There are variable that contain 97% of NAs in na_train and 100% NAs in na_test - all to be excluded
+
+Subset both training and testing datasets, excluding variables that don’t contain any values in the testing dataset
+
+```{r}
+training_subset <- training_subset[, !(names(training_subset) %in% na_test)]
+testing_subset <- testing_subset[, !(names(testing_subset) %in% na_test)]
+```
+
+Checking for NA in both datasets
+
+```{r}
+any(is.na(training_subset))
+any(is.na(testing_subset))
+```
+
+Variables with missing values have been excluded from both training and testing datasets.
+
+# Data Analysis
+
+Splitting the training dataset into training and testing.
+
+```{r}
+set.seed(111)
+inTrain = createDataPartition(training_subset$classe, p = 3/4)[[1]]
+training_data = training_subset[ inTrain,]
+testing_data = training_subset[-inTrain,]
+```
+
+Selecting predictors
+
+Creating inputs for model LASSO
+
+```{r}
+x_train <- model.matrix(classe~., data=training_data)[,-1]
+y_train <- as.factor(training_data$classe)
+
+x_test <- model.matrix(classe~., data=testing_data)[,-1]
+y_test <- as.factor(testing_data$classe)
+```
+
+Fitting a LASSO model to select best predictors
+
+```{r}
+mod_LASSO <- glmnet(x_train, y_train, alpha=1, family = "multinomial")
+```
+
+Cross validating and identifying the best predictors with the smallest lambda, then plotting.
+
+Argument type.multinomial = "grouped" has been included to leave out predictors revelant only to certain outcome levels.
+
+```{r, echo=FALSE}
+cv_fit <- cv.glmnet(x_train, y_train, alpha = 1, family = "multinomial", type.multinomial = "grouped")
+```
+
+Trying out several selection methods.
+
+```{r}
+coef_lassomin <- coef(cv_fit, s = "lambda.min")
+plot(cv_fit)
+```
+
+Extracting selected predictors
+
+```{r}
+selected <- unique(unlist(lapply(coef_lassomin, function(x) {rownames(x)[x[,1] != 0]})))
+```
+
+Removing Intercept and checking selected pedictors
+
+```{r}
+selected <- selected[selected != "(Intercept)"]
+selected 
+```
+
+Too many predictors included. Trying lambda.1se to avoid overfitting.
+
+```{r}
+coef_lasso1se <- coef(cv_fit, s = "lambda.1se")
+plot(cv_fit)
+selected <- unique(unlist(lapply(coef_lasso1se, function(x) {rownames(x)[x[,1] != 0]})))
+selected <- selected[selected != "(Intercept)"]
+selected
+```
+
+Still too many predictors included. Forcing to reduce the number of predictors by adjusting lambda.
+
+```{r}
+coef_lasso50 <- coef(cv_fit, s = cv_fit$lambda.1se * 50)
+selected <- unique(unlist(lapply(coef_lasso50, function(x) {rownames(x)[x[,1] != 0]})))
+selected <- selected[selected != "(Intercept)"]
+selected
+```
+
+Ten predictors were selected. Checking their prediction power using cross validation.
+
+```{r}
+x_train_selected <- x_train[ , selected, drop = FALSE]
+modRF <- train(x = x_train_selected, y = y_train, method="rf", trControl = trainControl(method = "cv", number = 5))
+modRF$results
+```
+
+Accuracy is good enough but we'll try improving it by including a few additional predictors, while limiting the number of predictors to avoid overfitting.
+
+```{r}
+coef_lasso40 <- coef(cv_fit, s = cv_fit$lambda.1se * 40)
+selected <- unique(unlist(lapply(coef_lasso40, function(x) {rownames(x)[x[,1] != 0]})))
+selected <- selected[selected != "(Intercept)"]
+selected
+```
+
+15 predictors were selected. Checking their prediction power.
+
+```{r}
+x_train_selected <- x_train[ , selected, drop = FALSE]
+modRF <- train(x = x_train_selected, y = y_train, method="rf", trControl = trainControl(method = "cv", number = 5))
+modRF$results
+```
+
+Predictive power has not improved significantly. Fitting the initial model to the testing dataset.
+
+```{r}
+selected <- unique(unlist(lapply(coef_lasso50, function(x) {rownames(x)[x[,1] != 0]})))
+selected <- selected[selected != "(Intercept)"]
+x_train_selected <- x_train[ , selected, drop = FALSE]
+modRF <- train(x = x_train_selected, y = y_train, method="rf")
+predRF <- predict(modRF, x_test)
+confusionMatrix(y_test, predRF)
+```
+
+Based on Accuracy 0.9525, the expected out of sample error is 0.0475.
+
+In addition, several models have been checked. RF provided the best prediction power. Stacking models did not improve accuracy. Therefore, RF model has been used for this prediction.
+
+Using the RF model to predict 20 different test cases.
+
+```{r}
+predRF_final <- predict(modRF, testing)
+predRF_final
+```
